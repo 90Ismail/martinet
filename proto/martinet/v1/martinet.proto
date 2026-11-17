@@ -1,0 +1,166 @@
+syntax = "proto3";
+
+package martinet.v1;
+
+option go_package = "github.com/90Ismail/martinet/gen/martinet/v1;martinetv1";
+
+// ---------- Domain messages (also the wire format on Kafka / mq) ----------
+
+// Event is what a tenant publishes. Stored on the `events` log, keyed by tenant.
+message Event {
+  string id = 1;              // server-assigned, ULID-like, time ordered
+  string tenant_id = 2;
+  string type = 3;            // e.g. "order.created"
+  bytes payload = 4;          // opaque JSON from the tenant
+  int64 occurred_at_ms = 5;   // event time, set by the producer
+  int64 received_at_ms = 6;   // processing time, set by ingest
+  string idempotency_key = 7;
+}
+
+message Subscription {
+  string id = 1;
+  string tenant_id = 2;
+  string url = 3;
+  repeated string event_types = 4; // empty = all types; "order.*" prefix match
+  string secret = 5;               // HMAC signing secret
+  int64 created_at_ms = 6;
+  bool paused = 7;
+}
+
+// DeliveryJob is one (event, endpoint) pair. Lives on mq (our message queue).
+message DeliveryJob {
+  string delivery_id = 1; // = event_id + ":" + subscription_id (stable for dedupe)
+  Event event = 2;
+  string subscription_id = 3;
+  string url = 4;
+  string secret = 5;
+  uint32 attempt = 6;      // 1-based attempt number of the NEXT try
+  int64 first_enqueued_ms = 7;
+}
+
+enum AttemptOutcome {
+  ATTEMPT_OUTCOME_UNSPECIFIED = 0;
+  ATTEMPT_OUTCOME_SUCCESS = 1;
+  ATTEMPT_OUTCOME_RETRYABLE_FAILURE = 2;
+  ATTEMPT_OUTCOME_PERMANENT_FAILURE = 3;
+  ATTEMPT_OUTCOME_CIRCUIT_OPEN = 4; // skipped: endpoint breaker open
+}
+
+// DeliveryAttempt is appended to the `attempts` log for every try.
+// It is the source of truth for status-api (carnet) and pouls (health).
+message DeliveryAttempt {
+  string delivery_id = 1;
+  string event_id = 2;
+  string tenant_id = 3;
+  string subscription_id = 4;
+  string endpoint = 5;      // url host, the circuit-breaker key
+  uint32 attempt = 6;
+  AttemptOutcome outcome = 7;
+  int32 http_status = 8;
+  string error = 9;
+  int64 latency_ms = 10;
+  int64 attempted_at_ms = 11; // event time for windowing in pouls
+  bool dead_lettered = 12;
+  string worker = 13;
+}
+
+enum BreakerState {
+  BREAKER_STATE_UNSPECIFIED = 0;
+  BREAKER_STATE_CLOSED = 1;
+  BREAKER_STATE_OPEN = 2;
+  BREAKER_STATE_HALF_OPEN = 3;
+}
+
+// EndpointHealth is emitted by pouls to the compacted `endpoint-health` topic.
+message EndpointHealth {
+  string endpoint = 1;
+  BreakerState state = 2;
+  double failure_rate = 3;
+  uint64 attempts = 4;
+  uint64 failures = 5;
+  int64 window_start_ms = 6;
+  int64 window_end_ms = 7;
+  int64 open_until_ms = 8;
+  uint64 late_events = 9;
+  double p99_latency_ms = 10;
+}
+
+// ---------- Services ----------
+
+service Ingest {
+  rpc PublishEvent(PublishEventRequest) returns (PublishEventResponse);
+  rpc CreateSubscription(CreateSubscriptionRequest) returns (Subscription);
+  rpc ListSubscriptions(ListSubscriptionsRequest) returns (ListSubscriptionsResponse);
+}
+
+message PublishEventRequest {
+  string tenant_id = 1;
+  string type = 2;
+  bytes payload = 3;
+  string idempotency_key = 4;
+  int64 occurred_at_ms = 5;
+}
+message PublishEventResponse {
+  string event_id = 1;
+  bool duplicate = 2; // idempotency key seen before; event_id is the original
+}
+
+message CreateSubscriptionRequest {
+  string tenant_id = 1;
+  string url = 2;
+  repeated string event_types = 3;
+}
+message ListSubscriptionsRequest { string tenant_id = 1; }
+message ListSubscriptionsResponse { repeated Subscription subscriptions = 1; }
+
+service Status {
+  rpc GetDelivery(GetDeliveryRequest) returns (DeliveryStatus);
+  rpc ListEventDeliveries(ListEventDeliveriesRequest) returns (ListEventDeliveriesResponse);
+}
+
+message GetDeliveryRequest { string delivery_id = 1; }
+message DeliveryStatus {
+  string delivery_id = 1;
+  AttemptOutcome last_outcome = 2;
+  bool dead_lettered = 3;
+  repeated DeliveryAttempt attempts = 4;
+}
+message ListEventDeliveriesRequest { string event_id = 1; }
+message ListEventDeliveriesResponse { repeated DeliveryStatus deliveries = 1; }
+
+service Admin {
+  rpc ListDeadLetters(ListDeadLettersRequest) returns (ListDeadLettersResponse);
+  rpc ReplayDeadLetters(ReplayDeadLettersRequest) returns (ReplayDeadLettersResponse);
+}
+
+// Pulse is served by pouls (C++): live circuit-breaker view per endpoint.
+service Pulse {
+  rpc GetEndpointHealth(GetEndpointHealthRequest) returns (EndpointHealth);
+  rpc ListEndpointHealth(ListEndpointHealthRequest) returns (ListEndpointHealthResponse);
+}
+
+message DeadLetter {
+  DeliveryJob job = 1;
+  string reason = 2;
+  int64 dead_lettered_at_ms = 3;
+}
+message ListDeadLettersRequest { uint32 limit = 1; }
+message ListDeadLettersResponse {
+  repeated DeadLetter items = 1;
+  uint32 queue_depth = 2;
+}
+message ReplayDeadLettersRequest {
+  uint32 limit = 1;            // 0 = all
+  string delivery_id = 2;      // replay just this one if set
+  string subscription_id = 3;  // or everything for one endpoint
+}
+message ReplayDeadLettersResponse {
+  uint32 replayed = 1;
+  uint32 skipped = 2;
+}
+message GetEndpointHealthRequest { string endpoint = 1; }
+message ListEndpointHealthRequest {}
+message ListEndpointHealthResponse {
+  repeated EndpointHealth endpoints = 1;
+  int64 watermark_ms = 2;
+}

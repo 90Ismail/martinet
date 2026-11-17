@@ -1,0 +1,138 @@
+# Whole system on one machine, for development and the end-to-end test.
+#   make up        # build images + start
+#   make e2e       # publish load, kill things, check nothing was lost
+# Kubernetes manifests (deploy/k8s) are the production-shaped version.
+
+x-go: &go
+  image: martinet-go:dev
+  restart: unless-stopped
+  environment: &goenv
+    KAFKA_BROKERS: kafka:9092
+    MQ_ADDR: mq:7072
+    CARNET_ADDR: carnet:7070
+    LOG_LEVEL: info
+  depends_on:
+    init:
+      condition: service_completed_successfully
+
+services:
+  kafka:
+    image: apache/kafka:3.9.1
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    ports: ["29092:29092"]
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 5s
+      retries: 30
+
+  mq:
+    image: martinet-go:dev
+    command: ["mq"]
+    environment:
+      MQ_MAX_RECEIVES: "10"
+    ports: ["7072:7072"]
+    restart: unless-stopped
+
+  carnet:
+    image: martinet-cpp:dev
+    command: ["carnet-server", "--dir", "/data", "--addr", "0.0.0.0:7070"]
+    volumes: ["carnet-data:/data"]
+    ports: ["7070:7070"]
+    restart: unless-stopped
+
+  init:
+    image: martinet-go:dev
+    command: ["martinetctl", "init", "-rf", "1"]
+    environment:
+      KAFKA_BROKERS: kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: "no"
+
+  pouls:
+    image: martinet-cpp:dev
+    command: ["pouls"]
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      POULS_WINDOW_MS: "5000"
+      POULS_ALLOWED_LATENESS_MS: "2000"
+      POULS_MIN_ATTEMPTS: "10"
+      POULS_OPEN_MS: "15000"
+    ports: ["7071:7071"]
+    restart: unless-stopped
+    depends_on:
+      init:
+        condition: service_completed_successfully
+
+  ingest:
+    <<: *go
+    command: ["ingest"]
+    ports: ["8080:8080", "9090:9090"]
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      carnet:
+        condition: service_started
+
+  fanout:
+    <<: *go
+    command: ["fanout"]
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      mq:
+        condition: service_started
+
+  courier:
+    <<: *go
+    command: ["courier"]
+    deploy:
+      replicas: 2
+    environment:
+      <<: *goenv
+      CONCURRENCY: "32"
+      HTTP_TIMEOUT: 5s
+      MAX_ATTEMPTS: "4"
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      mq:
+        condition: service_started
+
+  status:
+    <<: *go
+    command: ["status"]
+    ports: ["9091:9091"]
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      mq:
+        condition: service_started
+
+  sink:
+    image: martinet-go:dev
+    command: ["sink"]
+    ports: ["8088:8088"]
+
+  # A second receiver on its own host, so tripping its circuit breaker
+  # (breakers are per host) does not affect deliveries to `sink`.
+  badsink:
+    image: martinet-go:dev
+    command: ["sink"]
+    ports: ["8089:8088"]
+
+volumes:
+  carnet-data:

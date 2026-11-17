@@ -1,0 +1,57 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test -race ./...
+
+  cpp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Builds carnet + pouls against Debian packages and runs ctest inside.
+      - run: docker build -f deploy/docker/cpp.Dockerfile -t martinet-cpp:ci .
+
+  cpp-sanitizers:
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          apt-get update && apt-get install -y --no-install-recommends build-essential cmake ninja-build \
+            pkg-config libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev protobuf-compiler \
+            librdkafka-dev libgtest-dev libssl-dev zlib1g-dev
+      - run: cmake -S cpp -B build -G Ninja -DMARTINET_SANITIZE=ON -DCMAKE_BUILD_TYPE=Debug
+      - run: cmake --build build
+      - run: ctest --test-dir build --output-on-failure
+
+  terraform:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        env: [local, gcp]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform fmt -check -recursive terraform
+      - run: terraform init -backend=false -input=false
+        working-directory: terraform/envs/${{ matrix.env }}
+      - run: terraform validate
+        working-directory: terraform/envs/${{ matrix.env }}
+
+  kustomize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: kubectl kustomize deploy/k8s/overlays/local > /dev/null
+      - run: kubectl kustomize deploy/k8s/overlays/gcp > /dev/null

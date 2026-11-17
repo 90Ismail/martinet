@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: martinet
+  annotations:
+    # Bound to the GSA created in terraform/envs/gcp (roles: pubsub.publisher,
+    # pubsub.subscriber, storage.objectAdmin on the backup bucket).
+    iam.gke.io/gcp-service-account: martinet-workload@PROJECT_ID.iam.gserviceaccount.com

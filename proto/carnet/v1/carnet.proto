@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+package carnet.v1;
+
+option go_package = "github.com/90Ismail/martinet/gen/carnet/v1;carnetv1";
+
+// Carnet is a small LSM-tree key-value store. It holds Martinet's metadata
+// (subscriptions, idempotency keys) and the delivery-status projection.
+service Carnet {
+  rpc Put(PutRequest) returns (PutResponse);
+  rpc Get(GetRequest) returns (GetResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+  // Batch applies all ops atomically (single WAL record).
+  rpc Batch(BatchRequest) returns (BatchResponse);
+  // Scan streams key/value pairs in [start, end) in key order.
+  rpc Scan(ScanRequest) returns (stream KeyValue);
+  rpc Stats(StatsRequest) returns (StatsResponse);
+  // CompareAndPut writes value only if the key is currently absent.
+  // Used for idempotency keys.
+  rpc PutIfAbsent(PutRequest) returns (PutIfAbsentResponse);
+}
+
+message KeyValue {
+  bytes key = 1;
+  bytes value = 2;
+}
+
+message PutRequest {
+  bytes key = 1;
+  bytes value = 2;
+  bool sync = 3; // fsync the WAL before acknowledging
+}
+message PutResponse { uint64 sequence = 1; }
+
+message PutIfAbsentResponse {
+  bool written = 1;
+  bytes existing = 2; // set when written == false
+}
+
+message GetRequest { bytes key = 1; }
+message GetResponse {
+  bool found = 1;
+  bytes value = 2;
+}
+
+message DeleteRequest {
+  bytes key = 1;
+  bool sync = 2;
+}
+message DeleteResponse { uint64 sequence = 1; }
+
+message BatchOp {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    KIND_PUT = 1;
+    KIND_DELETE = 2;
+  }
+  Kind kind = 1;
+  bytes key = 2;
+  bytes value = 3;
+}
+message BatchRequest {
+  repeated BatchOp ops = 1;
+  bool sync = 2;
+}
+message BatchResponse { uint64 sequence = 1; }
+
+message ScanRequest {
+  bytes start = 1;
+  bytes end = 2;    // exclusive; empty = unbounded
+  uint32 limit = 3; // 0 = unlimited
+}
+
+message StatsRequest {}
+message LevelStats {
+  uint32 level = 1;
+  uint32 files = 2;
+  uint64 bytes = 3;
+}
+message StatsResponse {
+  uint64 last_sequence = 1;
+  uint64 memtable_bytes = 2;
+  repeated LevelStats levels = 3;
+  uint64 compactions = 4;
+  uint64 flushes = 5;
+  uint64 bloom_negatives = 6; // SST reads avoided by bloom filters
+}

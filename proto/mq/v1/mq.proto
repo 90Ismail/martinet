@@ -1,0 +1,93 @@
+syntax = "proto3";
+
+package mq.v1;
+
+option go_package = "github.com/90Ismail/martinet/gen/mq/v1;mqv1";
+
+// MQ is Martinet's own message queue (cmd/mq). SQS-style semantics:
+//   - Receive leases a message for `visibility_ms`; if it is not acked in
+//     time it becomes visible again (another consumer gets it).
+//   - Nack(delay_ms) makes it visible again after a delay (retry backoff).
+//   - After `max_receives` deliveries a message moves to "<queue>.dlq".
+service MQ {
+  rpc Send(SendRequest) returns (SendResponse);
+  rpc Receive(ReceiveRequest) returns (ReceiveResponse);
+  rpc Ack(AckRequest) returns (AckResponse);
+  rpc Nack(NackRequest) returns (NackResponse);
+  rpc DeadLetter(DeadLetterRequest) returns (AckResponse);
+  rpc Stats(StatsRequest) returns (StatsResponse);
+  rpc Peek(PeekRequest) returns (PeekResponse);
+  // Redrive moves messages from <queue>.dlq back to <queue>.
+  rpc Redrive(RedriveRequest) returns (RedriveResponse);
+}
+
+message Message {
+  string id = 1;
+  string queue = 2;
+  bytes body = 3;
+  map<string, string> attributes = 4;
+  uint32 receive_count = 5;
+  int64 enqueued_at_ms = 6;
+  string receipt = 7; // lease handle; changes on every receive
+}
+
+message SendRequest {
+  string queue = 1;
+  bytes body = 2;
+  map<string, string> attributes = 3;
+  int64 delay_ms = 4;
+}
+message SendResponse { string id = 1; }
+
+message ReceiveRequest {
+  string queue = 1;
+  uint32 max = 2;
+  int64 visibility_ms = 3;
+  int64 wait_ms = 4; // long poll
+}
+message ReceiveResponse { repeated Message messages = 1; }
+
+message AckRequest {
+  string queue = 1;
+  string receipt = 2;
+}
+message AckResponse {}
+
+message NackRequest {
+  string queue = 1;
+  string receipt = 2;
+  int64 delay_ms = 3;
+}
+message NackResponse {}
+
+message DeadLetterRequest {
+  string queue = 1;
+  string receipt = 2;
+  string reason = 3;
+}
+
+message StatsRequest {}
+message QueueStats {
+  string name = 1;
+  uint64 ready = 2;
+  uint64 delayed = 3;
+  uint64 in_flight = 4;
+  uint64 sent = 5;
+  uint64 acked = 6;
+  uint64 dead_lettered = 7;
+}
+message StatsResponse { repeated QueueStats queues = 1; }
+
+message PeekRequest {
+  string queue = 1;
+  uint32 max = 2;
+}
+message PeekResponse { repeated Message messages = 1; }
+
+message RedriveRequest {
+  string queue = 1;          // the source queue; drains <queue>.dlq
+  uint32 max = 2;            // 0 = all
+  string attribute_key = 3;  // optional filter
+  string attribute_value = 4;
+}
+message RedriveResponse { uint32 moved = 1; }

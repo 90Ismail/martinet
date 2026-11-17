@@ -1,0 +1,28 @@
+# kind cluster: shrink Kafka replication to 1.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+patches:
+  - target: { kind: KafkaNodePool, name: dual }
+    patch: |
+      - { op: replace, path: /spec/replicas, value: 1 }
+      - { op: replace, path: /spec/storage/size, value: 2Gi }
+  - target: { kind: Kafka, name: martinet }
+    patch: |
+      - op: replace
+        path: /spec/kafka/config
+        value:
+          default.replication.factor: 1
+          min.insync.replicas: 1
+          offsets.topic.replication.factor: 1
+          transaction.state.log.replication.factor: 1
+          transaction.state.log.min.isr: 1
+          auto.create.topics.enable: false
+      - { op: remove, path: /spec/kafka/rack }
+  - target: { kind: KafkaTopic }
+    patch: |
+      - { op: replace, path: /spec/replicas, value: 1 }
+  - target: { kind: KafkaTopic, name: events }
+    patch: |
+      - { op: replace, path: /spec/config/min.insync.replicas, value: 1 }

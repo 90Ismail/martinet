@@ -1,0 +1,227 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: martinet
+data:
+  KAFKA_BROKERS: martinet-kafka-bootstrap:9092
+  MQ_ADDR: mq:7072
+  CARNET_ADDR: carnet:7070
+  EVENT_LOG: kafka
+  LOG_LEVEL: info
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingest
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: ingest }
+  template:
+    metadata:
+      labels: { app: ingest }
+      annotations: { prometheus.io/scrape: "true", prometheus.io/port: "9100" }
+    spec:
+      serviceAccountName: martinet
+      containers:
+        - name: ingest
+          image: martinet-go
+          command: ["ingest"]
+          envFrom: [{ configMapRef: { name: martinet } }]
+          ports:
+            - { name: http, containerPort: 8080 }
+            - { name: grpc, containerPort: 9090 }
+            - { name: metrics, containerPort: 9100 }
+          readinessProbe:
+            grpc: { port: 9090 }
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { memory: 256Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingest
+spec:
+  selector: { app: ingest }
+  ports:
+    - { name: http, port: 8080, targetPort: http }
+    - { name: grpc, port: 9090, targetPort: grpc }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ingest
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: ingest }
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: 70 } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fanout
+spec:
+  # More replicas than `events` partitions (12) would sit idle: partitions
+  # are the unit of parallelism for a consumer group.
+  replicas: 3
+  selector:
+    matchLabels: { app: fanout }
+  template:
+    metadata:
+      labels: { app: fanout }
+      annotations: { prometheus.io/scrape: "true", prometheus.io/port: "9100" }
+    spec:
+      serviceAccountName: martinet
+      containers:
+        - name: fanout
+          image: martinet-go
+          command: ["fanout"]
+          envFrom: [{ configMapRef: { name: martinet } }]
+          ports: [{ name: metrics, containerPort: 9100 }]
+          readinessProbe:
+            httpGet: { path: /healthz, port: metrics }
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { memory: 256Mi }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: courier
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: courier }
+  template:
+    metadata:
+      labels: { app: courier }
+      annotations: { prometheus.io/scrape: "true", prometheus.io/port: "9100" }
+    spec:
+      serviceAccountName: martinet
+      # Longer than HTTP_TIMEOUT so in-flight webhooks finish on SIGTERM.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: courier
+          image: martinet-go
+          command: ["courier"]
+          envFrom: [{ configMapRef: { name: martinet } }]
+          env:
+            - { name: CONCURRENCY, value: "64" }
+            - { name: HTTP_TIMEOUT, value: 10s }
+          ports: [{ name: metrics, containerPort: 9100 }]
+          readinessProbe:
+            httpGet: { path: /healthz, port: metrics }
+          resources:
+            requests: { cpu: 200m, memory: 128Mi }
+            limits: { memory: 512Mi }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: courier
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: courier }
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: 60 } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: status
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: status }
+  template:
+    metadata:
+      labels: { app: status }
+      annotations: { prometheus.io/scrape: "true", prometheus.io/port: "9100" }
+    spec:
+      serviceAccountName: martinet
+      containers:
+        - name: status
+          image: martinet-go
+          command: ["status"]
+          envFrom: [{ configMapRef: { name: martinet } }]
+          ports:
+            - { name: grpc, containerPort: 9091 }
+            - { name: metrics, containerPort: 9100 }
+          readinessProbe:
+            grpc: { port: 9091 }
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: status
+spec:
+  selector: { app: status }
+  ports: [{ name: grpc, port: 9091, targetPort: grpc }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pouls
+spec:
+  # One instance per consumer group partition set; two for availability,
+  # Kafka rebalances partitions between them.
+  replicas: 2
+  selector:
+    matchLabels: { app: pouls }
+  template:
+    metadata:
+      labels: { app: pouls }
+    spec:
+      containers:
+        - name: pouls
+          image: martinet-cpp
+          command: ["pouls"]
+          env:
+            - name: KAFKA_BROKERS
+              valueFrom: { configMapKeyRef: { name: martinet, key: KAFKA_BROKERS } }
+            - { name: POULS_WINDOW_MS, value: "10000" }
+            - { name: POULS_ALLOWED_LATENESS_MS, value: "5000" }
+          ports: [{ name: grpc, containerPort: 7071 }]
+          readinessProbe:
+            grpc: { port: 7071 }
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pouls
+spec:
+  selector: { app: pouls }
+  ports: [{ name: grpc, port: 7071, targetPort: grpc }]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: martinet
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: courier
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: courier }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ingest
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: ingest }

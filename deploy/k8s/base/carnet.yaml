@@ -1,0 +1,52 @@
+# carnet is a single-writer store: one StatefulSet replica with a persistent
+# volume. Replication is the obvious next step (see README "Trade-offs");
+# until then its contents are either rebuildable from Kafka (attempts) or
+# small and backed up (subscriptions, idempotency keys).
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: carnet
+spec:
+  serviceName: carnet
+  replicas: 1
+  selector:
+    matchLabels: { app: carnet }
+  template:
+    metadata:
+      labels: { app: carnet }
+    spec:
+      securityContext: { runAsUser: 10001, fsGroup: 10001 }
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: carnet
+          image: martinet-cpp
+          command: ["carnet-server", "--dir", "/data", "--addr", "0.0.0.0:7070"]
+          ports: [{ name: grpc, containerPort: 7070 }]
+          env:
+            - { name: CARNET_MEMTABLE_BYTES, value: "8388608" }
+          readinessProbe:
+            grpc: { port: 7070 }
+            periodSeconds: 5
+          livenessProbe:
+            grpc: { port: 7070 }
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 250m, memory: 256Mi }
+            limits: { memory: 1Gi }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: { storage: 10Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: carnet
+spec:
+  selector: { app: carnet }
+  ports: [{ name: grpc, port: 7070, targetPort: grpc }]

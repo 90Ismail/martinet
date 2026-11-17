@@ -1,0 +1,38 @@
+# Martinet's own message queue (cmd/mq). In-memory, single replica: a
+# learning implementation, not a durable broker (see README trade-offs).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mq
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: mq }
+  template:
+    metadata:
+      labels: { app: mq }
+      annotations: { prometheus.io/scrape: "true", prometheus.io/port: "9100" }
+    spec:
+      containers:
+        - name: mq
+          image: martinet-go
+          command: ["mq"]
+          env:
+            - { name: MQ_MAX_RECEIVES, value: "10" }
+          ports:
+            - { name: grpc, containerPort: 7072 }
+            - { name: metrics, containerPort: 9100 }
+          readinessProbe:
+            grpc: { port: 7072 }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { memory: 1Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mq
+spec:
+  selector: { app: mq }
+  ports: [{ name: grpc, port: 7072, targetPort: grpc }]

@@ -1,0 +1,22 @@
+# GKE: events flow through Cloud Pub/Sub instead of Kafka for the
+# ingest -> fanout hop; images come from Artifact Registry; pods use
+# Workload Identity (no JSON keys); courier streams attempts to BigQuery.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+patches:
+  - path: workload-identity.yaml
+  - target: { kind: ConfigMap, name: martinet }
+    patch: |
+      - { op: replace, path: /data/EVENT_LOG, value: pubsub }
+      - { op: add, path: /data/GCP_PROJECT, value: PROJECT_ID }
+      - { op: add, path: /data/FANOUT_GROUP, value: fanout }
+      - { op: add, path: /data/BQ_ATTEMPTS_TOPIC, value: attempts-bq }
+images:
+  - name: martinet-go
+    newName: REGION-docker.pkg.dev/PROJECT_ID/martinet/martinet-go
+    newTag: latest
+  - name: martinet-cpp
+    newName: REGION-docker.pkg.dev/PROJECT_ID/martinet/martinet-cpp
+    newTag: latest

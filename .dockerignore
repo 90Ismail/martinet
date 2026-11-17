@@ -1,0 +1,5 @@
+cpp/build
+bin
+.git
+terraform/**/.terraform
+*.log

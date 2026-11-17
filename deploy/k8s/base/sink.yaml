@@ -1,0 +1,28 @@
+# Test receiver used by the demo and the chaos test. Not for production.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sink
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: sink }
+  template:
+    metadata:
+      labels: { app: sink }
+    spec:
+      containers:
+        - name: sink
+          image: martinet-go
+          command: ["sink"]
+          ports: [{ name: http, containerPort: 8088 }]
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sink
+spec:
+  selector: { app: sink }
+  ports: [{ name: http, port: 8088, targetPort: http }]
